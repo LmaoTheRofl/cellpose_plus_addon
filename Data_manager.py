@@ -9,7 +9,7 @@ from torchvision.transforms import ToTensor, Compose, ConvertImageDtype
 import torch.nn.functional as F
 
 
-class SegmentationDataset(Dataset):
+class MaskRCNNDataset(Dataset):
     def __init__(self, root_dir, transform=None):
         self.root_dir = root_dir
         self.transform = transform or Compose([ToTensor(), ConvertImageDtype(torch.float)])
@@ -82,7 +82,62 @@ class SegmentationDataset(Dataset):
 
         return image, target
     
-def collate_fn(batch):
+
+class EfficientDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = root_dir
+        self.transform = transform or Compose([ToTensor(), ConvertImageDtype(torch.float)])
+        self.images = sorted([f for f in os.listdir(root_dir) if f.endswith('.tif')])
+    
+    def __len__(self):
+        return len(self.images)
+    
+    def __getitem__(self, idx):
+        img_name = self.images[idx]
+        base_name = os.path.splitext(img_name)[0]
+        
+        img_path = os.path.join(self.root_dir, img_name)
+        subdir = os.path.join(self.root_dir, base_name)
+        image = Image.open(img_path).convert("RGB")
+        
+        labels_dir = os.path.join(subdir, 'labels')
+        mask_files = sorted(os.listdir(labels_dir), key=lambda x: int(x.split('.')[0]))
+        masks = []
+        for mf in mask_files:
+            mask_path = os.path.join(labels_dir, mf)
+            mask = Image.open(mask_path).convert('L')
+            masks.append(mask)
+        
+        primary_dir = os.path.join(subdir, 'primary')
+        center_csv = os.path.join(primary_dir, base_name + '_Center.csv')
+        size_roundness_csv = os.path.join(primary_dir, base_name + '_size_roundness.csv')
+        
+        info = pd.concat([pd.read_csv(center_csv, names=['x', 'y']), pd.read_csv(size_roundness_csv, names=['size', 'roundness'])], axis=1)
+        info['classes'] = info['size'].apply(lambda x: 1 if x <= 40 else 2)
+        # print(f"Info rows count for {base_name}: {len(info)}")
+        # print(f"Mask files count: {len(mask_files)}")
+        W, H = image.size
+        target = torch.zeros((H, W), dtype=torch.long) 
+        for i, mask in enumerate(masks):
+            mask_tensor = self.transform(mask).squeeze(0) 
+            mask_tensor = (mask_tensor > 0).float()
+            
+            if mask_tensor.sum() == 0: 
+                continue
+            
+            class_label = info['classes'].iloc[i]
+            target[mask_tensor > 0] = class_label 
+        
+        image = self.transform(image)
+        
+        return image, target
+
+def mask_collate_fn(batch):
     images = [item[0] for item in batch]
+    targets = [item[1] for item in batch]
+    return images, targets
+
+def eff_collate_fn(batch):
+    images = torch.stack([item[0] for item in batch])
     targets = [item[1] for item in batch]
     return images, targets
