@@ -31,6 +31,7 @@ class NucleiDataset(Dataset):
 
         img = (img - img.min()) / (img.max() - img.min() + 1e-8)
         img = np.power(img, 0.8).astype(np.float32)
+
         return np.stack([img, np.zeros_like(img)], axis=0)
 
     def load_masks(self, base_name, H, W):
