@@ -239,11 +239,11 @@ class NucleiDataset2(Dataset):
     
 
 class NucleiDataset3(Dataset):
+
     def __init__(self, root_dir, resize_to=None, augment=False):
         self.root_dir = root_dir
         self.resize_to = resize_to
         self.augment = augment
-
         self.images = sorted([f for f in os.listdir(root_dir) if f.endswith('.tif')])
 
     def __len__(self):
@@ -260,95 +260,60 @@ class NucleiDataset3(Dataset):
                 img = np.max(img, axis=0)
 
         img = (img - img.min()) / (img.max() - img.min() + 1e-8)
-
         img = np.power(img, 0.8).astype(np.float32)
 
         return np.stack([img, np.zeros_like(img)], axis=0)
 
     def load_masks(self, base_name, H, W):
         labels_dir = os.path.join(self.root_dir, base_name, "labels")
-        mask_files = sorted(os.listdir(labels_dir), key=lambda x: int(x.split('.')[0]))
 
+        mask_files = sorted(os.listdir(labels_dir), key=lambda x: int(x.split('.')[0]))
         combined = np.zeros((H, W), dtype=np.int32)
         instance_id = 1
-
         for mf in mask_files:
             mask = np.array(Image.open(os.path.join(labels_dir, mf)).convert("L"))
-
-            mask_bin = (mask > 0).astype(np.uint8)
-
-            if mask_bin.shape != (H, W):
-                mask_bin = np.array(
-                    Image.fromarray(mask_bin).resize((W, H), resample=Image.NEAREST)
-                )
-
-
-            combined[(mask_bin == 1) & (combined == 0)] = instance_id
+            mask = (mask > 0).astype(np.uint8)
+            if mask.shape != (H, W):
+                mask = np.array(Image.fromarray(mask).resize((W, H), resample=Image.NEAREST))            
+            combined[mask == 1] = instance_id
             instance_id += 1
-
         return combined
-
     def augment_pair(self, img, masks):
-
-        # horizontal flip
+        # flip horizontal
         if random.random() < 0.5:
             img = img[:, :, ::-1].copy()
             masks = masks[:, ::-1].copy()
 
-        # vertical flip
+        # flip vertical
         if random.random() < 0.5:
             img = img[:, ::-1, :].copy()
             masks = masks[::-1, :].copy()
 
+        # rotation 
         if random.random() < 0.5:
             img = np.rot90(img, 2, axes=(1, 2)).copy()
             masks = np.rot90(masks, 2, axes=(0, 1)).copy()
 
-        # gamma
+        # gamma augmentation
         if random.random() < 0.4:
             gamma = random.uniform(0.7, 1.5)
-            img = np.clip(img ** gamma, 0, 1)
+            img = img ** gamma
 
         # Gaussian noise
         if random.random() < 0.3:
             noise = np.random.normal(0, 0.03, img.shape).astype(np.float32)
             img = np.clip(img + noise, 0, 1)
 
-        return img, masks
-
-
+        return img, masks    
     def __getitem__(self, idx):
-
         img_name = self.images[idx]
         base_name = os.path.splitext(img_name)[0]
-        img_path = os.path.join(self.root_dir, img_name)
 
-        image = self.load_image(img_path)
+        image = self.load_image(os.path.join(self.root_dir, img_name))
         H, W = image.shape[-2:]
-
         combined_masks = self.load_masks(base_name, H, W)
 
-        if self.resize_to:
-
-            image = np.transpose(image, (1, 2, 0))
-
-            image = transforms.resize_image(
-                image,
-                Ly=self.resize_to[0],
-                Lx=self.resize_to[1],
-                interpolation=1
-            )
-
-            image = np.transpose(image, (2, 0, 1))
-
-            combined_masks = transforms.resize_image(
-                combined_masks,
-                Ly=self.resize_to[0],
-                Lx=self.resize_to[1],
-                interpolation=0,
-                no_channels=True
-            )
-
+        # augment
         if self.augment:
             image, combined_masks = self.augment_pair(image, combined_masks)
 
@@ -358,20 +323,20 @@ class NucleiDataset3(Dataset):
             pad_w = (div - W % div) % div
             if pad_h > 0 or pad_w > 0:
                 if arr.ndim == 3:
-                    arr = np.pad(arr, ((0,0), (0,pad_h), (0,pad_w)), mode="reflect")
-                else:
-                    arr = np.pad(arr, ((0,pad_h), (0,pad_w)), mode="reflect")
-            return arr
+                    arr = np.pad(arr, ((0,0),(0,pad_h),(0,pad_w)), mode='reflect')
+                elif arr.ndim == 2:
+                    arr = np.pad(arr, ((0,pad_h),(0,pad_w)), mode='reflect')
+            return arr    
 
         image = pad_32(image)
         combined_masks = pad_32(combined_masks)
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dy, dx, cellprob, _ = dynamics.labels_to_flows([combined_masks], device=torch.device('cpu'))[0]
 
-        flows_list = dynamics.labels_to_flows([combined_masks], device=device)
+        eps = 1e-4
+        cellprob = np.clip(cellprob, eps, 1 - eps)
+        cell_logit = np.log(cellprob / (1 - cellprob))
 
-        dy, dx, cellprob, _ = flows_list[0]
-        
-        lbl = np.stack([cellprob, dy, dx], axis=0).astype(np.float32)
+        lbl = np.stack([dy, dx, cell_logit], axis=0).astype(np.float32)
 
         return torch.from_numpy(image).float(), torch.from_numpy(lbl).float()
