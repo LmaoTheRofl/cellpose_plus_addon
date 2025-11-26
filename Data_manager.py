@@ -151,9 +151,6 @@ class NucleiDataset2(Dataset):
 
     def load_masks(self, base_name, H, W):
         labels_dir = os.path.join(self.root_dir, base_name, "labels")
-        if not os.path.exists(labels_dir):
-            return np.zeros((H, W), dtype=np.int32)
-
         mask_files = sorted(os.listdir(labels_dir), key=lambda x: int(os.path.splitext(x)[0]))
         combined = np.zeros((H, W), dtype=np.int32)
         instance_id = 1
@@ -318,12 +315,9 @@ class NucleiDataset3(Dataset):
         img = np.power(img, 0.8).astype(np.float32)
 
         return np.stack([img, np.zeros_like(img)], axis=0)
-
+    
     def load_masks(self, base_name, H, W):
         labels_dir = os.path.join(self.root_dir, base_name, "labels")
-        if not os.path.exists(labels_dir):
-            return np.zeros((H, W), dtype=np.int32)
-
         mask_files = sorted(os.listdir(labels_dir), key=lambda x: int(os.path.splitext(x)[0]))
         combined = np.zeros((H, W), dtype=np.int32)
         instance_id = 1
@@ -337,6 +331,18 @@ class NucleiDataset3(Dataset):
             # combined[mask == 1] = instance_id
             instance_id += 1
         return combined
+    
+    # def load_masks(self, base_name, H, W):
+    #     labels_dir = os.path.join(self.root_dir, base_name, "labels")
+    #     mask_files = sorted(os.listdir(labels_dir), key=lambda x: int(x.split('.')[0]))
+    #     combined = np.zeros((H, W), dtype=np.int32)
+    #     for i, mf in enumerate(mask_files):
+    #         mask = np.array(Image.open(os.path.join(labels_dir, mf)).convert("L"))
+    #         if mask.shape != (H, W):
+    #             mask = np.array(Image.fromarray(mask).resize((W, H), resample=Image.NEAREST))
+    #         # combined[(mask == 1) & (combined == 0)] = i + 1
+    #         combined[mask > 0] = i + 1
+    #     return combined
 
     def augment_pair(self, img, masks):
         flip_h = random.random() < 0.5
@@ -401,33 +407,35 @@ class NucleiDataset3(Dataset):
         if self.resize_to:
             Ly, Lx = self.resize_to
             image = transforms.resize_image(image.transpose(1,2,0), Ly=Ly, Lx=Lx).transpose(2,0,1)
-            dy = transforms.resize_image(dy, Ly=Ly, Lx=Lx)
-            dx = transforms.resize_image(dx, Ly=Ly, Lx=Lx)
-            cell_logit = transforms.resize_image(cell_logit, Ly=Ly, Lx=Lx)            
-        # dy, dx, cellprob, _ = dynamics.labels_to_flows([masks], device=torch.device("cpu"))[0]
 
-        # dy = np.nan_to_num(dy).astype(np.float32)
-        # dx = np.nan_to_num(dx).astype(np.float32)
-        # cellprob = np.nan_to_num(cellprob).astype(np.float32)
+        dy, dx, cellprob2, _ = dynamics.labels_to_flows([masks], device=torch.device("cpu"))[0]
+
+        dy = np.nan_to_num(dy).astype(np.float32)
+        dx = np.nan_to_num(dx).astype(np.float32)
+        # cellprob2 = np.nan_to_num(cellprob).astype(np.float32)
 
         cellprob = (masks > 0).astype(np.float32) 
         
-        gy, gx = np.gradient(cellprob) # cellprob - бинарная маска, получаем градиент для вычисления вертикального потока и горизонтального, которые требуются в cellpose моделях
-        dy, dx = -gy, -gx 
-        # max_abs = max(
-        #     np.max(np.abs(dy)),
-        #     np.max(np.abs(dx)),
-        #     1e-6
-        # )
-        # dy = dy / max_abs
-        # dx = dx / max_abs
+        # gy, gx = np.gradient(cellprob) # cellprob - бинарная маска, получаем градиент для вычисления вертикального потока и горизонтального, которые требуются в cellpose моделях
+        # dy, dx = -gy, -gx 
+        
+        # norm = np.sqrt(dy**2 + dx**2) + 1e-6
+        # dy = dy / norm
+        # dx = dx / norm
+        max_abs = max(
+            np.max(np.abs(dy)),
+            np.max(np.abs(dx)),
+            1e-6
+        )
+        dy = dy / max_abs
+        dx = dx / max_abs
 
         # eps = 1e-6
         # cellprob = np.clip(cellprob, eps, 1 - eps)
-        # # cell_logit = np.log(cellprob / (1 - cellprob)).astype(np.float32)
+        # cell_logit = np.log(cellprob / (1 - cellprob)).astype(np.float32)
 
         lbl = np.stack([dy, dx, cellprob], axis=0).astype(np.float32)
-
+ 
         return (
             torch.from_numpy(image).float(),
             torch.from_numpy(lbl).float(),
